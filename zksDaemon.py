@@ -68,10 +68,15 @@ class zksDaemon(object):
     """
     #participan角色数量最大值
     PARTICIPANT_MAX_NUM = 7
+
     #加锁延迟常量
     DELAY_FOR_ELECTION = 10
+
     #内部异常保护重试间隔
     DELAY_FOR_RETRY_IF_ERROR= 10
+
+    #集群比例格式：[集群总数下界，集群总数上界,参与者数]，如4,15,3表示：集群规模在4-15个节点之间时，则需要3个particpant
+    ZKS_RULES=('1,1,1', '2,2,2', '3,3,3', '4,15,3', '16,100,5', '101,50000,7')
 
     def __init__(self, myhost, myid, timeout=4.0, check_delay=60*5,
                 lockPath='/zks/lock', statusPath='/pos/participant_status',
@@ -129,6 +134,7 @@ class zksDaemon(object):
                     self.log.error("loop err: {}".format(e))
                     #异常时,避免频繁重试，设置间隔时间
                     time.sleep(self.DELAY_FOR_RETRY_IF_ERROR)
+            self.log.info("run exit.")
         except Exception as e:
             self.log.error("run err: {}".format(e))
             self.alive = False
@@ -154,25 +160,30 @@ class zksDaemon(object):
             self.log.WARN("mynode[%s] can't get lock to be a substitute." %(self.myid))
             return False
         retry=False
-        if self._is_remove():
-            #改变自己节点角色只有本节点会执行，不存在并发问题，不用加写锁
-            self.log.WARN("my node[%s] have removed, participant switch to observer." %(self.myid))
-            self._switch_observer()
-            retry=True
-        else:
-            my_status_path = os.path.join(self.participant_status_path, self.myid)
-            my_status = self.zkc.exists(my_status_path)
-            #避免重启，旧的session还未超时，导致其还占着状态值
-            if my_status is not None:
-                (session_id, session_pwd) = self.zkc.client_id
-                if my_status.owner_session_id != session_id:
-                    self.zkc.delete(my_status_path)
-                    self.zkc.create(my_status_path, ephemeral=True, makepath=True)
+        try:
+            if self._is_remove():
+                #改变自己节点角色只有本节点会执行，不存在并发问题，不用加写锁
+                self.log.WARN("my node[%s] have removed, participant switch to observer." %(self.myid))
+                self._switch_observer()
+                retry=True
             else:
-                #如果节点不存在，但集群还存在自己的配置，则可以重新注册自己的状态,注册本节点状态只有本节点再会执行，不需要写锁
-                self.zkc.create(my_status_path, ephemeral=True, makepath=True)
-        lock.release()
-        return retry
+                my_status_path = os.path.join(self.participant_status_path, self.myid)
+                my_status = self.zkc.exists(my_status_path)
+                #避免重启，旧的session还未超时，导致其还占着状态值
+                if my_status is not None:
+                    (session_id, session_pwd) = self.zkc.client_id
+                    if my_status.owner_session_id != session_id:
+                        self.zkc.delete(my_status_path)
+                        self.zkc.create(my_status_path, ephemeral=True, makepath=True)
+                else:
+                    #如果节点不存在，但集群还存在自己的配置，则可以重新注册自己的状态,注册本节点状态只有本节点再会执行，不需要写锁
+                    self.zkc.create(my_status_path, ephemeral=True, makepath=True)
+        except Exception as e:
+            self.log.error("do participant err: {}".format(e))
+            retry=True
+        finally:
+            lock.release()
+            return retry
                 
     def _do_observer(self):
         #避免加锁带来开销，这里获取不用分布式锁。如果正好处于临界区，超时或者其它observer节点将会重新替补。
@@ -231,7 +242,8 @@ class zksDaemon(object):
             self.log.info("Zookeeper session suspended, state: %s" %(str(state)))
         else:
             self.log.error("Zookeeper connection lost: %s" %(str(state)))
-            self.alive = False
+            self.stop()
+
 
     def _connect(self, listener):
         self.log.info("Connecting to Zookeeper with host[%s], retry[%d,%d]" %(self.host, self.max_delay_s, self.max_retries))
@@ -337,8 +349,7 @@ class zksDaemon(object):
             raise e
     
     def _get_absent_participant_num(self):
-        #集群比例格式：[集群总数下界，集群总数上界,参与者数]，如4,10-3表示4到10个节点则需要3个particpant
-        zks_rules=['1,1,1', '2,2,2', '3,3,3', '4,10,3', '11,100,5', '101,50000,7']
+        
         nodes = self._get_nodes()
         min_participant=0
         observers=0
@@ -351,7 +362,7 @@ class zksDaemon(object):
 
         #集群默认最大participant数
         expect_participant_num = self.PARTICIPANT_MAX_NUM
-        for rule in zks_rules:
+        for rule in self.ZKS_RULES:
             (start, end, num) = rule.split(',')
             if len(nodes)  <= int(end) and len(nodes)  >= int(start):
                 expect_participant_num = int(num)
@@ -473,7 +484,7 @@ class zksDaemon(object):
             return is_retry
 
 def daemon(myid, host):
-    delay_s = 10*3
+    delay_s = 15
     timeout_s = 8
     hosts=[host]
     cur_host=host

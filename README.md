@@ -21,7 +21,7 @@ debian：
 进入项目目录，执行镜像本地打包
 镜像打包需要安装kazoo，可能会因为下载地址为国外镜像源而失败。若失败重试即可
 
-    docker build -t zksdaemon:1.0.1 -f Dockerfile . --no-cache
+    docker build -t zksdaemon:latest -f Dockerfile . --no-cache
 
 # 集群
 ### 1.zookeeper集群

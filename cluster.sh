@@ -86,6 +86,7 @@ dataLogDir=/datalog
 reconfigEnabled=true
 preAllocSize=16384
 standaloneEnabled=false" > $zksDir/conf/zoo.cfg
+    #这里可以考虑少于等于3个节点时，都是participant。
     if [ -z $cluster ];then
         echo -e "server.$myid=$myip:2888:3888:participant;0.0.0.0:$CPORT" >> $zksDir/conf/zoo.cfg
     else
@@ -147,7 +148,8 @@ function create_zks(){
 	local ip=$2
 	local path=$3
 	cmd="docker run -dit --name=$CLUSTER_NAME-$id --network=$network_name --ip=$ip -v $path/conf:/conf -v $path/data:/data -v $path/datalog:/datalog $ZKS_IMAGE"
-
+    docker container stop $CLUSTER_NAME-$id > /dev/null 2>&1
+    docker rm $CLUSTER_NAME-$id > /dev/null 2>&1
 	$cmd
 	if [ $? != 0 ];then
 		echo "run docker fail, [$cmd]"
@@ -206,6 +208,8 @@ function add_zks_daemon(){
         docker container stop $CLUSTER_NAME-$myid-daemon
 	    docker rm $CLUSTER_NAME-$myid-daemon
     fi
+    docker container stop $CLUSTER_NAME-$myid-daemon > /dev/null 2>&1
+    docker rm $CLUSTER_NAME-$myid-daemon> /dev/null 2>&1
     cmd="docker run -dit --name=$CLUSTER_NAME-$myid-daemon --network=host $ZKS_DAEMON_IMAGE $myid $myhost"
     $cmd
     if [ $? != 0 ];then
@@ -230,14 +234,14 @@ function clear_cluster()
 #创建zookeeper集群
 i=1
 net_ip=${NETWORK_ADDR%.*}
-g_myid=1
+g_myid=2
 echo "Now create zookeeper cluster: $net_ip. [$g_myid - $NODE_NUM] "
 server_info=''
 clear_cluster
 while [ $i -le $NODE_NUM ]
 do
 	let i++
-    let ip_addr=g_myid+1
+    let ip_addr=g_myid
 	node_ip=$net_ip.$ip_addr
 
 	echo "zks Node message: {id:$g_myid} {ip:$node_ip}"
