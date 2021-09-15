@@ -76,7 +76,7 @@ class zksDaemon(object):
     DELAY_FOR_RETRY_IF_ERROR= 10
 
     #集群比例格式：[集群总数下界，集群总数上界,参与者数]，如4,15,3表示：集群规模在4-15个节点之间时，则需要3个particpant
-    ZKS_RULES=('1,1,1', '2,2,2', '3,3,3', '4,15,3', '16,100,5', '101,50000,7')
+    ZKS_RULES=('1,1,1', '2,2,2', '3,3,3', '4,4,4', '5,100,5', '101,50000,7')
 
     def __init__(self, myhost, myid, timeout=4.0, check_delay=60*5,
                 lockPath='/zks/lock', statusPath='/pos/participant_status',

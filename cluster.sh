@@ -2,54 +2,50 @@
 
 #set -ex
 
-WORK_DIR=$1
-NODE_NUM=$2
-CLUSTER_NAME="zks"
-NETWORK_ADDR='172.22.2.0'
-CPORT='9639'
+WORK_DIR=`pwd`
+NODE_NUM=3
+CLUSTER_ID=2
 ZKS_DAEMON_IMAGE='zksdaemon:latest'
 ZKS_IMAGE='zookeeper:3.6.3'
+IS_CLEAR=0
 
-if [ -z $NODE_NUM ];then
-    NODE_NUM=3
-fi
-
-if [ -z $WORK_DIR ];then
-    WORK_DIR=`pwd`
-    WORK_DIR=$WORK_DIR"/zksData"
-    mkdir $WORK_DIR
-    echo "cmd: $0 [data dir] [node numbers]"
-    exit 1
-fi
-
-if [ ! -z $3 ];then
-    ZKS_DAEMON_IMAGE=$3
-fi
-
-if [ ! -z $4 ];then
-    ZKS_IMAGE=$4
-fi
-
-echo "### zookeeper cluster ###"
-echo "WORK_DIR: $WORK_DIR"
-echo "NODE_NUM: $NODE_NUM"
-echo "CLUSTER_NAME: $CLUSTER_NAME"
-echo "NETWORK_ADDR: $NETWORK_ADDR"
-echo "CPORT: $CPORT"
-echo "ZKS_DAEMON_IMAGE: $ZKS_DAEMON_IMAGE"
-echo "ZKS_IMAGE: $ZKS_IMAGE"
-echo "####################\n"
-
-#建立集群网络
-network_name=$CLUSTER_NAME'-net'
-ret=`docker network ls |grep "$network_name"|awk '{print $2}'`
-if [ "$ret" != "$network_name" ];then
-    docker network create --subnet=$NETWORK_ADDR/24 $network_name
-    if [ $? != 0 ];then
-        echo "docker network create --subnet=$NETWORK_ADDR/24 $network_name fail..."
-        exit 1
-    fi
-fi
+while getopts "p:n:d:z:i:hc" arg 
+do
+        case $arg in
+            c)
+                IS_CLEAR=1
+                echo "Cleaning cluster...."
+                ;;
+            p)
+                WORK_DIR=$OPTARG
+                ;;
+            n)
+                NODE_NUM=$OPTARG
+                ;;
+            d)
+                ZKS_DAEMON_IMAGE=$OPTARG
+                ;;
+            z)
+                ZKS_IMAGE=$OPTARG
+                ;;
+            i)
+                CLUSTER_ID=$OPTARG
+                ;;
+            h)
+                echo "### help ####"
+                echo "Usage:  $0 -p [path] -n [node numbers] -i [cluster id] -d [zks daemon docker image] -z [ zookeeper docker image]"
+                echo "-h  :  help message"
+                echo "-c  :  clear cluster."
+                echo "###      ####"
+                exit 0
+                ;;
+            ?) 
+                echo "ERROR:  unkonw argument: $*"
+                echo "Usage:  $0 -p [path] -n [node numbers] -i [cluster id] -d [zks daemon docker image] -z [ zookeeper docker image]"
+                exit 1
+                ;;
+        esac
+done
 
 function create_zks_cfg(){
     local myid=$1
@@ -70,15 +66,18 @@ function create_zks_cfg(){
     rm -rf $zksDir/*
     mkdir $zksDir/{conf,data,datalog}
     echo "$myid">$zksDir/data/myid
-    echo "autopurge.purgeInterval=12
+    echo "autopurge.purgeInterval=8
 initLimit=10
 syncLimit=2
-autopurge.snapRetainCount=40
+autopurge.snapRetainCount=3
 skipACL=yes
 forceSync=no
 zookeeper.electionPortBindRetry=604800
 4lw.commands.whitelist=*
 globalOutstandingLimit=5000
+metricsProvider.className=org.apache.zookeeper.metrics.prometheus.PrometheusMetricsProvider
+metricsProvider.httpPort=7000
+metricsProvider.exportJvmInfo=true
 [zookeeper]=
 tickTime=2000
 dataDir=/data
@@ -95,8 +94,6 @@ standaloneEnabled=false" > $zksDir/conf/zoo.cfg
     fi
 
 echo "export ZK_SERVER_HEAP=2048
-export JMXLOCALONLY=true
-export JMX_RMI_HOST=localhost
 export JMXPORT=9630
 export ZOO_ADMIN_SERVER_ENABLE=false
 export ZOO_ADMIN_SERVER_HOST=localhost
@@ -223,7 +220,7 @@ function add_zks_daemon(){
 
 function clear_cluster()
 {
-    for cons in `docker container ps |grep $CLUSTER_NAME|awk '{print$1}'`
+    for cons in `docker container ps -a|grep $CLUSTER_NAME|awk '{print$1}'`
     do
         docker container stop $cons
         docker rm $cons
@@ -231,13 +228,64 @@ function clear_cluster()
     done
 }
 
+CLUSTER="zks"
+CLUSTER_NAME="$CLUSTER.$CLUSTER_ID"
+NETWORK_ADDR="172.22.$CLUSTER_ID.0"
+CPORT='9639'
+
+echo "### create zookeeper cluster ###"
+
+if [ ! -d $WORK_DIR ];then
+    echo "WORK_DIR: $WORK_DIR invalid"
+    exit 1
+fi
+
+WORK_DIR="$WORK_DIR/$CLUSTER_NAME"
+if [ ! -e $WORK_DIR ];then
+    mkdir $WORK_DIR
+fi
+
+echo "WORK_DIR: $WORK_DIR"
+echo "NODE_NUM: $NODE_NUM"
+echo "CLUSTER_NAME: $CLUSTER_NAME"
+echo "NETWORK_ADDR: $NETWORK_ADDR"
+echo "CPORT: $CPORT"
+echo "ZKS_DAEMON_IMAGE: $ZKS_DAEMON_IMAGE"
+echo "ZKS_IMAGE: $ZKS_IMAGE"
+echo "####################"
+
+
+
 #创建zookeeper集群
 i=1
 net_ip=${NETWORK_ADDR%.*}
 g_myid=2
-echo "Now create zookeeper cluster: $net_ip. [$g_myid - $NODE_NUM] "
 server_info=''
+
 clear_cluster
+if [ $IS_CLEAR != 0 ];then
+    for cons in `docker container ps -a|grep $CLUSTER|awk '{print$1}'`
+    do
+        docker container stop $cons
+        docker rm $cons
+        echo "stop and rm container: $cons"
+    done
+    echo "Clear zookeeper cluster Finished."
+    exit 0
+fi
+
+#建立集群网络
+network_name=$CLUSTER_NAME'-net'
+ret=`docker network ls |grep "$network_name"|awk '{print $2}'`
+if [ "$ret" != "$network_name" ];then
+    docker network create --subnet=$NETWORK_ADDR/24 $network_name
+    if [ $? != 0 ];then
+        echo "docker network create --subnet=$NETWORK_ADDR/24 $network_name fail..."
+        exit 1
+    fi
+fi
+
+echo "Now create zookeeper cluster: $net_ip.[$g_myid - $NODE_NUM] "
 while [ $i -le $NODE_NUM ]
 do
 	let i++
