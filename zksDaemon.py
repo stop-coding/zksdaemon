@@ -152,7 +152,11 @@ class zksDaemon(object):
             self.log.error("stop err: {}".format(e))
     
     def _do_participant(self):
-        lock = self.zkc.ReadLock(self.lock_path, str(self.myid))
+        if self._is_participant_surplus() and not self._is_leader():
+            self.log.WARN("participant overload, my node[%s] need switch to observer." %(self.myid))
+            return self._degrade_observer()
+        
+        lock = self.zkc.WriteLock(self.lock_path, str(self.myid))
         if not lock.acquire(timeout=self.timeout):
             self.log.WARN("mynode[%s] can't get lock to be a substitute." %(self.myid))
             return False
@@ -288,7 +292,18 @@ class zksDaemon(object):
         except Exception as e:
             self.log.error("get_role err: {}".format(e))
             return zksRole.UNKNOWN
-    
+
+    def _is_leader(self):
+        try:
+            rsp = self._fourcmd('stat')
+            if rsp.find('leader') > 0:
+                return  True
+            else:
+                return  False
+        except Exception as e:
+            self.log.error("check is leader err: {}".format(e))
+            return False
+        
     def _get_nodes(self):
         nodes={}
         try:
@@ -345,29 +360,44 @@ class zksDaemon(object):
             self.log.error("get participant status err: {}".format(e))
             raise e
     
-    def _get_absent_participant_num(self):
-        
+    def _get_alive_num(self):
         nodes = self._get_nodes()
-        min_participant=0
+        participant=0
         observers=0
         for node in nodes.values():
             if node['role'] == zksRole.PARTICIPANT:
                 if self.is_zks_alive(node['host'] + ':' + node['cport']):
-                    min_participant+=1
+                    participant+=1
             else:
-                observers+=1
-
-        #集群默认最大participant数
+                if self.is_zks_alive(node['host'] + ':' + node['cport']):
+                    observers+=1
+        return(len(nodes), participant,observers)
+    
+    def _get_min_participant_num(self, total):
         expect_participant_num = self.PARTICIPANT_MAX_NUM
         for rule in self.ZKS_RULES:
             (start, end, num) = rule.split(',')
-            if len(nodes)  <= int(end) and len(nodes)  >= int(start):
+            if total  <= int(end) and total  >= int(start):
                 expect_participant_num = int(num)
                 break
+        return expect_participant_num
+    
+    def _is_participant_surplus(self):
+        (total, participant, observers) = self._get_alive_num()
+        min_num = self._get_min_participant_num(total)
+        if min_num < participant:
+            return True
+        else:
+            return False
+
+    def _get_absent_participant_num(self):
+        (total, participant, observers) = self._get_alive_num()
+        #集群默认最大participant数
+        min_num = self._get_min_participant_num(total)
         self.log.info("myid[%s], total:%d, participant:%d, observer:%d, expact participant:%d" 
-                    %(self.myid, len(nodes), min_participant, observers, expect_participant_num))
-        if min_participant < expect_participant_num:
-            return (expect_participant_num - min_participant)
+                    %(self.myid, total, participant, observers, min_num))
+        if participant < min_num:
+            return (min_num - participant)
         return 0
 
     def is_zks_alive(self, client='127.0.0.1:9639'):
@@ -470,14 +500,36 @@ class zksDaemon(object):
                 time.sleep(wait_after_do_remove_s)
                 self.log.info("reconfig: add " + joins)
                 is_retry = self.do_reconfig(joining=joins, leaving=None)
-            lock.release()
+            self.log.info("myid[%s] elected participant success!" %(self.myid))
         except Exception as e:
             self.log.error("elected participant err: {}".format(e))
             if self._get_myrole != zksRole.PARTICIPANT and self.zkc.exists(my_status_path):
                 self.zkc.delete(my_status_path)
-            lock.release()
             is_retry = True
         finally:
+            lock.release()
+            return is_retry
+
+    def _degrade_observer(self):
+        lock = self.zkc.WriteLock(self.lock_path, str(self.myid))
+        self.log.info("myid[%s] lock path[%s]." %(self.myid, self.lock_path))
+        if not lock.acquire(timeout=self.timeout):
+            self.log.WARN("mynode[%s] can't get lock to be a substitute." %(self.myid))
+            return False
+        if not self._is_participant_surplus():
+            self.log.WARN('participant can not degrade to observer now.')
+            lock.release()
+            return True
+        self.log.info("myid[%s] try to degrade observer." %(self.myid))
+        is_retry = False
+        try:
+            self._switch_observer()
+            self.log.info("myid[%s] degrade observer success!" %(self.myid))
+        except Exception as e:
+            self.log.error("degrade participant err: {}".format(e))
+            is_retry = True
+        finally:
+            lock.release()
             return is_retry
 
 def daemon(myid, host):
@@ -527,7 +579,7 @@ def main(argv):
         daemon(myid, myhost)
     except Exception as e:
         print("main: {}".format(e))
-        print("cmd: [%s] [%s]." %(myid, myhost))
+        print("cmd: -i [%s]  -h [%s]." %(myid, myhost))
         raise e
 
 if __name__ == "__main__":
