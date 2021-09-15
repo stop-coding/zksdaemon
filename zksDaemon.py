@@ -93,7 +93,7 @@ class zksDaemon(object):
         else:
             self.log = zkLogger()
         self.notify = threading.Event()
-        self.hosts = [myhost]
+        self.hosts = {myid:myhost}
         #session尝试重连时间间隔,单位秒
         self.max_delay_s = 1
         #session尝试重连最多次数
@@ -134,7 +134,7 @@ class zksDaemon(object):
                     self.log.error("loop err: {}".format(e))
                     #异常时,避免频繁重试，设置间隔时间
                     time.sleep(self.DELAY_FOR_RETRY_IF_ERROR)
-            self.log.info("run exit.")
+            self.log.WARN("run exit.")
         except Exception as e:
             self.log.error("run err: {}".format(e))
             self.alive = False
@@ -151,9 +151,6 @@ class zksDaemon(object):
         except Exception as e:
             self.log.error("stop err: {}".format(e))
     
-    def get_hosts(self):
-        return self.hosts
-
     def _do_participant(self):
         lock = self.zkc.ReadLock(self.lock_path, str(self.myid))
         if not lock.acquire(timeout=self.timeout):
@@ -195,7 +192,7 @@ class zksDaemon(object):
         if self._get_absent_participant_num() > 0:
             return self._elected_participant()
         else:
-            self.log.WARN("mynode[%s] keep observer." %(self.myid))
+            self.log.info("mynode[%s] keep observer." %(self.myid))
             return False
 
     def _wait_wakeup(self, timeout, role):
@@ -316,8 +313,8 @@ class zksDaemon(object):
                 (node['host'], node['tport'], node['eport'], node['role']) = host.split(':')
                 (discard, node['cport']) = listenter.split(':')
                 nodes[node['id']] = node
-                if self.hosts.count(node['host'] +':' +node['cport']) == 0:
-                    self.hosts.append(node['host'] +':' +node['cport'])
+                if node['id'] not in self.hosts:
+                    self.hosts[node['id']] = node['host'] +':' +node['cport']
         except Exception as e:
             self.log.error("get nodes err: {}".format(e))
         finally:
@@ -486,7 +483,7 @@ class zksDaemon(object):
 def daemon(myid, host):
     delay_s = 15
     timeout_s = 8
-    hosts=[host]
+    hosts={myid:host}
     cur_host=host
     zks =None
     while(True):  
@@ -498,10 +495,10 @@ def daemon(myid, host):
             print("daemon err: {}".format(e))
         finally:
             if zks:
-                for peer in zks.get_hosts():
-                    if hosts.count(peer) > 0:
+                for id,addr in zks.hosts.items():
+                    if id in hosts:
                         continue
-                    hosts.append(peer)
+                    hosts[id] = addr
                 zks =None
             print("cluster hosts:", hosts)
             print("zks daemon exit, sleep time %d, will retry." %(delay_s))
@@ -530,7 +527,7 @@ def main(argv):
         daemon(myid, myhost)
     except Exception as e:
         print("main: {}".format(e))
-        print("cmd: [myid] [host].")
+        print("cmd: [%s] [%s]." %(myid, myhost))
         raise e
 
 if __name__ == "__main__":
