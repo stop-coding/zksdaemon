@@ -156,7 +156,11 @@ class zksDaemon(object):
             self.log.WARN("participant overload, my node[%s] need switch to observer." %(self.myid))
             return self._degrade_observer()
         
-        lock = self.zkc.WriteLock(self.lock_path, str(self.myid))
+        # 检查健康状态，避免反复加读锁    
+        if self._is_participant_ok():
+            return False
+
+        lock = self.zkc.ReadLock(self.lock_path, str(self.myid))
         if not lock.acquire(timeout=self.timeout):
             self.log.WARN("mynode[%s] can't get lock to be a substitute." %(self.myid))
             return False
@@ -171,7 +175,7 @@ class zksDaemon(object):
                 my_status_path = os.path.join(self.participant_status_path, self.myid)
                 my_status = self.zkc.exists(my_status_path)
                 #避免重启，旧的session还未超时，导致其还占着状态值
-                if my_status is not None:
+                if my_status:
                     (session_id, session_pwd) = self.zkc.client_id
                     if my_status.owner_session_id != session_id:
                         self.zkc.delete(my_status_path)
@@ -179,13 +183,28 @@ class zksDaemon(object):
                 else:
                     #如果节点不存在，但集群还存在自己的配置，则可以重新注册自己的状态,注册本节点状态只有本节点再会执行，不需要写锁
                     self.zkc.create(my_status_path, ephemeral=True, makepath=True)
+            self.log.info("my node[%s] register participant success." %(self.myid))
         except Exception as e:
             self.log.error("do participant err: {}".format(e))
             retry=True
         finally:
             lock.release()
             return retry
-                
+    
+    def _is_participant_ok(self):
+        if self._is_remove():
+            return False
+        my_status = self.zkc.exists(os.path.join(self.participant_status_path, self.myid))
+        #避免重启，旧的session还未超时，导致其还占着状态值
+        if my_status:
+            (session_id, session_pwd) = self.zkc.client_id
+            if my_status.owner_session_id == session_id:
+                return True
+            else:
+                return False
+        else:
+            return False
+    
     def _do_observer(self):
         #避免加锁带来开销，这里获取不用分布式锁。如果正好处于临界区，超时或者其它observer节点将会重新替补。
         if self._is_remove():

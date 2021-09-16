@@ -90,7 +90,7 @@ standaloneEnabled=false" > $zksDir/conf/zoo.cfg
         echo -e "server.$myid=$myip:2888:3888:participant;0.0.0.0:$CPORT" >> $zksDir/conf/zoo.cfg
     else
         echo -e "$cluster" >> $zksDir/conf/zoo.cfg
-        echo -e "server.$myid=$myip:2888:3888:observer;0.0.0.0:$CPORT" >> $zksDir/conf/zoo.cfg
+        echo -e "server.$myid=$myip:2888:3888:participant;0.0.0.0:$CPORT" >> $zksDir/conf/zoo.cfg
     fi
 
 echo "export ZK_SERVER_HEAP=2048
@@ -310,8 +310,9 @@ do
         exit 1
     fi
 
-	server_info=`echo conf|nc $node_ip $CPORT|grep 'server\.'|grep "$CPORT"`
-	echo "update cluster: $server_info"
+	#server_info=`echo conf|nc $node_ip $CPORT|grep 'server\.'|grep "$CPORT"`
+    server_info="$server_info""server.$g_myid=$node_ip:2888:3888:participant;0.0.0.0:$CPORT\n"
+	echo -e "update cluster: $server_info"
 
 	let g_myid++
 	sleep 5
