@@ -137,14 +137,14 @@ log4j.appender.SYSLOG.layout.conversionPattern=%d{ISO8601} [myid:%X{myid}] - %-5
 log4j.appender.SYSLOG.Facility=LOCAL6
 log4j.appender.SYSLOG.Threshold=debug
 log4j.appender.SYSLOG.FacilityPrinting=true' > $zksDir/conf/log4j.properties
-
+    chmod -R a+rwx  $zksDir
 }
 
 function create_zks(){
     local id=$1
 	local ip=$2
 	local path=$3
-	cmd="docker run -dit --name=$CLUSTER_NAME-$id --network=$network_name --ip=$ip -v $path/conf:/conf -v $path/data:/data -v $path/datalog:/datalog $ZKS_IMAGE"
+	cmd="docker run -dit --name=$CLUSTER_NAME-$id --privileged=true --network=$network_name --ip=$ip -v $path/conf:/conf -v $path/data:/data -v $path/datalog:/datalog $ZKS_IMAGE"
     docker container stop $CLUSTER_NAME-$id > /dev/null 2>&1
     docker rm $CLUSTER_NAME-$id > /dev/null 2>&1
 	$cmd
@@ -186,6 +186,7 @@ function add_zks_node(){
         echo "[create_zks_cfg $myid $myip $dataDir $cluster] fail..."
         return 1
     fi
+    sleep 1
     create_zks $myid $myip $dataDir
     if [ $? != 0 ];then
         echo "[create_zks $myid $myip $dataDir] fail..."
@@ -207,7 +208,7 @@ function add_zks_daemon(){
     fi
     docker container stop $CLUSTER_NAME-$myid-daemon > /dev/null 2>&1
     docker rm $CLUSTER_NAME-$myid-daemon> /dev/null 2>&1
-    cmd="docker run -dit --name=$CLUSTER_NAME-$myid-daemon --network=host $ZKS_DAEMON_IMAGE $myid $myhost"
+    cmd="docker run -dit --privileged=true --name=$CLUSTER_NAME-$myid-daemon --network=host $ZKS_DAEMON_IMAGE $myid $myhost"
     $cmd
     if [ $? != 0 ];then
 		echo "run daemon docker fail, [$cmd]"

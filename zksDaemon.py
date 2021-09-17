@@ -25,6 +25,7 @@ import sys, getopt
 import os
 import socket
 import threading
+import random
 
 class zkLogger(object):
     def error(self, log):
@@ -64,24 +65,49 @@ def zksCmd(host, cmd='ruok', timeout=1):
     
 class zksDaemon(object):
     """
-        常量
+    ##说明：
+        该类守护一个zookeeper server实例的动态配置
+        确保守护的节点能及时加入集群，以及根据策略，
+        转变自身角色
+    ##使用方法
+        直接调用：
+        daemon = zksDaemon(host="127.0.0.1:9639", myid=1)
+        daemon.run()
+        # 这里会阻塞，直到session过期或者超时自动释放
+
+        使用with:
+        with zksDaemon(host="127.0.0.1:9639", myid=1) as daemon:
+            print("wait %d exit" %(l.id))
+    ##注意：
+        该类实例的生命周期是zookeeper client session有效为准,
+        如果session无效，则该类实例也将无效释放资源，必须重建.
     """
     #participan角色数量最大值
     PARTICIPANT_MAX_NUM = 7
 
-    #加锁延迟常量
-    DELAY_FOR_ELECTION = 10
-
     #内部异常保护重试间隔
     DELAY_FOR_RETRY_IF_ERROR= 10
 
-    #集群比例格式：[集群总数下界，集群总数上界,参与者数]，如4,15,3表示：集群规模在4-15个节点之间时，则需要3个particpant
+    #集群比例格式：[集群总数下界，集群总数上界,参与者数]，如5,100,5表示：集群规模在5-100个节点之间时，则需要5个participant
     ZKS_RULES=('1,1,1', '2,2,2', '3,3,3', '4,4,4', '5,100,5', '101,50000,7')
 
-    def __init__(self, myhost, myid, timeout=4.0, check_delay=60*5,
-                lockPath='/zks/lock', statusPath='/pos/participant_status',
+    def __init__(self, myhost, myid, timeout=8.0, check_delay=60*5,
+                lockPath='/zookeeper/lock', statusPath='/zookeeper/status',
                 election_port=3888, transction_port=2888, logger=None):
+        """
+        ##参数说明：
+            myhost          需要守护的server，其客户端访问地址，如"10.24.37.1:9639".不可以是本地地址
+            myid            需要守护的serverid，每个zks都有一个唯一id值
+            timeout         session超时时间
+            check_delay     自动检查节点角色状态是否同步的时间间隔，默认为5分钟
+            lockPath        内部分布式锁的路径，默认不用改
+            statusPath      participant状态存储路径
+            election_port   选举端口，与默认不一样的话，得改
+            transction_port 内部传输端口，与默认不一样的话，就得改
+            logger          日志打印类，默认print，自定义的话需要继承基类zkLogger
+        """
         self.alive = False
+        self._is_wait= False
         self.zkc = None
         self.host = myhost
         self.myid = myid
@@ -102,11 +128,8 @@ class zksDaemon(object):
         self.tport = transction_port
         #强制唤醒检查节点状态时间间隔
         self.force_check_status_delay_s = check_delay
-
-    def __del__(self):
-        if self.zkc:
-            self.zkc.close()
-            self.zkc = None
+        self._force_switch_observer =False
+        self._keep_wait = False
 
     def run(self):
         try:
@@ -126,40 +149,72 @@ class zksDaemon(object):
                     if is_retry:
                         continue
                     self._wait_wakeup(timeout=self.force_check_status_delay_s, role=role)
-                except (RetryFailedError, SessionExpiredError) as e:
-                    #session 失效，直接退出
-                    self.log.error("reconnection fail, Session Expired err: {}".format(e))
+                except (RetryFailedError, SessionExpiredError, CancelledError) as e:
+                    #session 失效，直接退出, 确保session销毁
+                    if self.alive:
+                        self.log.error("reconnection fail, Session Expired err: {}".format(e))
                     raise e
                 except Exception as e:
                     self.log.error("loop err: {}".format(e))
-                    #异常时,避免频繁重试，设置间隔时间
-                    time.sleep(self.DELAY_FOR_RETRY_IF_ERROR)
+                    #其它内部异常时,避免频繁重试，设置间隔时间
+                    self._wait(self.DELAY_FOR_RETRY_IF_ERROR)
             self.log.WARN("run exit.")
         except Exception as e:
-            self.log.error("run err: {}".format(e))
+            if self.alive:
+                self.log.error("run err: {}".format(e))
             self.alive = False
             raise e
         
     def stop(self):
         try:
             self.alive = False
-            if not self.notify.is_set():
+            self.log.WARN("Stop zks daemon ...")
+            if self.notify and not self.notify.is_set():
                 self.notify.set()
-            
+            self.notify = None
             if self.zkc:
-                self.zkc.close()
+                self.zkc.stop()
+                self.zkc = None
+            self.log.WARN("Stop zks daemon success.")
         except Exception as e:
-            self.log.error("stop err: {}".format(e))
+            self.log.error("Stop daemon err: {}".format(e))
+            self.alive = False
     
+    def set_observer(self):
+        if not self.alive:
+            return
+        self._force_switch_observer = True
+        self._keep_wait = False
+        self.notify.set()
+
+    def __enter__(self):
+        self.run()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+    def __del__(self):
+        self.stop()
+    
+    def _wait(self, timeout):
+        self._is_wait = True
+        self.notify.wait(timeout)
+        if not self.alive:
+            raise CancelledError()
+        self._is_wait = False
+        self.notify.clear()
+
     def _do_participant(self):
         if self._is_participant_surplus() and not self._is_leader():
             self.log.WARN("participant overload, my node[%s] need switch to observer." %(self.myid))
             return self._degrade_observer()
-        
+        if self._force_switch_observer:
+            self.log.WARN("participant[%s] force switch to observer." %(self.myid))
+            return self._degrade_observer()
         # 检查健康状态，避免反复加读锁    
         if self._is_participant_ok():
             return False
-
         lock = self.zkc.ReadLock(self.lock_path, str(self.myid))
         if not lock.acquire(timeout=self.timeout):
             self.log.WARN("mynode[%s] can't get lock to be a substitute." %(self.myid))
@@ -188,6 +243,7 @@ class zksDaemon(object):
             self.log.error("do participant err: {}".format(e))
             retry=True
         finally:
+            #如果解锁失败，会抛出session异常，必然会终止session，临时节点也会消失，所以不用担心死锁
             lock.release()
             return retry
     
@@ -220,7 +276,8 @@ class zksDaemon(object):
 
     def _wait_wakeup(self, timeout, role):
         nodes = self._get_participant_status()
-        while(self.alive):
+        self._keep_wait = True
+        while(self.alive and self._keep_wait):
             oldtime=datetime.datetime.now()
             @self.zkc.ChildrenWatch(self.participant_status_path, send_event=True)
             def __status_change(children, event):
@@ -228,21 +285,18 @@ class zksDaemon(object):
                     return None
                 self.notify.set()
                 return False
-            self.notify.wait(timeout)
+            self._wait(timeout)
             nowtime=datetime.datetime.now()
-            self.notify.clear()
-            
+            childs = self._get_participant_status()
+            if len(nodes) > len(childs):
+                break
             if (nowtime -oldtime).seconds >= timeout:
                 break
-            else:
-                timeout -=((nowtime -oldtime).seconds)
-            
-            childs = self._get_participant_status()
-            if len(nodes) <= len(childs):
-                continue
-            break
+            timeout -=((nowtime -oldtime).seconds)
+
         self.log.info("zks [%s] wake up to update role, current role: %s" %(self.myid, role))
-        time.sleep(self.DELAY_FOR_ELECTION * int(self.myid)%3)
+        #随机延迟一点时间，避免惊群效应。使用信号等待，可立马被唤醒
+        self._wait(0.001*random.randint(10, 1000))
 
     def _switch_observer(self):
         try:
@@ -256,12 +310,14 @@ class zksDaemon(object):
         
     def _zks_listener(self, state):
         if state in KazooState.CONNECTED:
-            self.log.info("Zookeeper connection established, state: %s" %(str(state)))
+            (id, _) = self.zkc.client_id
+            self.log.info("Zookeeper connection established, state: %s, session id: 0x%x" %(str(state), id))
             self.alive = True
         elif state in KazooState.SUSPENDED:
             self.log.info("Zookeeper session suspended, state: %s" %(str(state)))
         else:
-            self.log.error("Zookeeper connection lost: %s" %(str(state)))
+            if self.alive:
+                self.log.error("Zookeeper connection lost: %s" %(str(state)))
             self.stop()
 
 
@@ -294,6 +350,8 @@ class zksDaemon(object):
         try:
             if self.zkc.exists(self.participant_status_path) is None:
                 self.zkc.create(self.participant_status_path, makepath=True)
+            if self.zkc.exists(self.lock_path) is None:
+                self.zkc.create(self.lock_path, makepath=True)
         except Exception as e:
             raise e
 
@@ -453,7 +511,7 @@ class zksDaemon(object):
             wait_interval = 0.5
             while not self.zkc.connected:
                 self.log.WARN("session is suspended, wait ...")
-                time.sleep(wait_interval)
+                self._wait(wait_interval)
                 max_wait_time -= wait_interval
                 if max_wait_time <= 0:
                     self.log.error(" session can't reconnected.")
@@ -475,9 +533,10 @@ class zksDaemon(object):
             return retry
         
     def _elected_participant(self):
-        #随机延迟，毫秒为单位
-        delay = (self.DELAY_FOR_ELECTION * int(self.myid))*0.001
-        time.sleep(delay)
+        #随机延迟[10, 1000]，毫秒为单位
+        delay = random.randint(10, 1000)
+        print("delay: ",delay)
+        self._wait(0.001*delay)
         lock = self.zkc.WriteLock(self.lock_path, str(self.myid))
         self.log.info("myid[%s] lock path[%s]." %(self.myid, self.lock_path))
         if not lock.acquire(timeout=self.timeout):
@@ -516,7 +575,7 @@ class zksDaemon(object):
                 self.do_reconfig(joining=None, leaving=self.myid)
                 is_retry = True
                 #如果这里异常，则该节点会变成影子节点，为了保证原子性，需要立马重试。
-                time.sleep(wait_after_do_remove_s)
+                self._wait(wait_after_do_remove_s)
                 self.log.info("reconfig: add " + joins)
                 is_retry = self.do_reconfig(joining=joins, leaving=None)
             self.log.info("myid[%s] elected participant success!" %(self.myid))
@@ -526,6 +585,7 @@ class zksDaemon(object):
                 self.zkc.delete(my_status_path)
             is_retry = True
         finally:
+            #如果解锁失败，会抛出session异常，必然会终止session，临时节点也会消失，所以不用担心死锁
             lock.release()
             return is_retry
 
@@ -548,33 +608,140 @@ class zksDaemon(object):
             self.log.error("degrade participant err: {}".format(e))
             is_retry = True
         finally:
+            #如果解锁失败，会抛出session异常，必然会终止session，临时节点也会消失，所以不用担心死锁
             lock.release()
             return is_retry
 
-def daemon(myid, host):
-    delay_s = 15
-    timeout_s = 8
-    hosts={myid:host}
-    cur_host=host
-    zks =None
-    while(True):  
-        try:
-            zks = zksDaemon(myid=myid, myhost=cur_host, timeout=timeout_s)
-            zks.run()
-            zks.stop()
-        except Exception as e:
-            print("daemon err: {}".format(e))
-        finally:
-            if zks:
-                for id,addr in zks.hosts.items():
-                    if id in hosts:
-                        continue
-                    hosts[id] = addr
-                zks =None
-            print("cluster hosts:", hosts)
-            print("zks daemon exit, sleep time %d, will retry." %(delay_s))
-            time.sleep(delay_s)
-   
+class zksLoop(object):
+    """
+    ##说明：
+        该类用于重建zksDaemon实例，使其保持一直运行状态，直至退出
+    ##使用方法
+        直接调用：
+        loop = zksLoop(host="127.0.0.1:9639", myid=1)
+        loop = start()
+        # 这里会阻塞，直到session过期或者超时自动释放
+
+        使用with:
+        with zksLoop(host="127.0.0.1:9639", myid=1) as l:
+            print("wait %d exit" %(l.id))
+    """
+    def __init__(self, host, myid, timeout=8.0, retry_delay=15,
+                lockPath='/zookeeper/lock', statusPath='/zookeeper/status',
+                election_port=3888, transction_port=2888, logger=None):
+        """
+        ##参数说明：
+            host            需要守护的server，其客户端访问地址，如"10.24.37.1:9639".不可以是本地地址
+            id              需要守护的serverid，每个zks都有一个唯一id值
+            timeout         session超时时间
+            check_delay     自动检查节点角色状态是否同步的时间间隔，默认为5分钟
+            lockPath        内部分布式锁的路径，默认不用改
+            statusPath      participant状态存储路径
+            election_port   选举端口，与默认不一样的话，得改
+            transction_port 内部传输端口，与默认不一样的话，就得改
+            logger          日志打印类，默认print，自定义的话需要继承基类zkLogger
+        """
+        self.host = host;
+        self.id = myid
+        self.timeout = timeout
+        self.retry_delay = retry_delay
+        self.lockPath = lockPath
+        self.statusPath = statusPath
+        self.election_port = election_port
+        self.transction_port = transction_port
+        if type(logger) is zkLogger:
+            self.logger = logger
+        else:
+            self.logger = zkLogger()
+        self.hosts = {myid:host}
+        self._daemon = None
+        self._is_runing = False
+        self._sig = threading.Event()
+    
+    def start(self):
+        self.is_runing = True
+        while(self.is_runing):
+            try:
+                self._daemon = zksDaemon(myid=self.id, myhost=self.host, timeout=self.timeout,
+                            lockPath=self.lockPath, statusPath=self.statusPath,
+                            election_port=self.election_port, transction_port=self.transction_port,
+                            logger = self.logger)
+                with self._daemon:
+                    self.logger.info("daemon finished.")
+            except Exception as e:
+                if self.is_runing:
+                    self.logger.error("daemon error:{}, exit.".format(e))
+                    raise e
+            if self.is_runing:
+                self.logger.info("zks daemon exit, sleep time [%ds], will rebuild." %(self.retry_delay))
+                self._sig.wait(self.retry_delay)
+        else:
+            self.logger.WARN("zks loop exit.")
+
+    def stop(self):
+        self.is_runing = False
+        self.logger.WARN("Stop zks loop ...")
+        if self._daemon:
+            self._daemon.stop()
+        self._daemon = None
+        self._sig.set()
+        self.logger.WARN("Stop zks loop success.")
+
+    def __enter__(self):
+        self.start()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+class zksThread(threading.Thread):
+    """
+    ##说明：
+        该类用于zksloop线程化执行,可以异步的操作zksloop
+    ##使用方法
+        mythread = zksThread(name="zks-daemon", loop=zksLoop(host="10.24.37.11:9639", myid=1), logger=zkLogger())
+        mythread.start()
+        #这里可以异步执行其它操作
+        ...
+        mythread.stop()
+        #退出前回收线程
+        mythread.join()
+        # 这里会阻塞，直到session过期或者超时自动释放
+    """
+    def __init__(self, name, loop, logger=None):
+        """
+        ##参数说明：
+            thread_name     线程名称
+            loop            zksLoop类的实例
+        """
+        super(zksThread, self).__init__(name=name)
+        self.name = name
+        if type(loop) is zksLoop:
+            self.zks= loop
+        else:
+            self.zks= None
+        if type(logger) is zkLogger:
+            self.logger = logger
+        else:
+            self.logger = zkLogger()
+    def run(self): 
+        self.logger.info("Starting thread: " + self.name)                  
+        if self.zks is None:
+            self.logger.error("zksLoop is None")
+            return
+        self.zks.start()
+    
+    def stop(self):
+        self.logger.info("Stopping thread: " + self.name)                    
+        if self.zks is None:
+            self.logger.error("zksLoop is None")
+            return
+        self.zks.stop()
+
+"""
+这里是测试demo，使用命令测试：
+ python3 zksDaemon.py -i 1 -h "172.22.2.3:9639"
+"""
 def main(argv):
     try:
         opts, args = getopt.getopt(argv[1:], "h:i:", ["host=",'id='])
@@ -595,7 +762,11 @@ def main(argv):
             raise ValueError("myid is None")
         if myhost is None:
             raise ValueError("my host is None")
-        daemon(myid, myhost)
+        #mythread = zksThread(name="mytest", loop=zksLoop(myid=myid, host=myhost))
+        #mythread.start()
+        #mythread.join()
+        with zksLoop(myid=myid, host=myhost):
+            print("wait exit ok.")
     except Exception as e:
         print("main: {}".format(e))
         print("cmd: -i [%s]  -h [%s]." %(myid, myhost))

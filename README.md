@@ -30,15 +30,15 @@ debian：
 默认建立3个节点集群；
 默认镜像zookeeper:3.6.3, zksdaemon:latest
 
-    ./cluster [工作目录] [节点数] [zks daemon image] [zks image]
+    ./cluster -p [path] -n [node numbers] -i [cluster id] -d [zks daemon docker image] -z [ zookeeper docker image]
+    ./cluster -p [工作目录] -n [节点数] -i [集群id] -d [zks daemon 镜像] -z [zookeeper 镜像]
 
     #例如当前目录下新建3个节点的集群，默认使用zookeeper:3.6.3,zksdaemon:latest镜像
-
-    ./cluster ./
+    ./cluster
 
     #例如在/opt/zookeeper/路径下新建5个节点的集群，使用zookeeper:3.6.0, zksdaemon:latest 镜像
 
-    ./cluster /opt/zookeeper/ 5 zookeeper:3.6.0 zksdaemon:latest
+    ./cluster -p /opt/zookeeper/ -n 5 -z zookeeper:3.6.0 -d zksdaemon:latest
 
 # 测试
  。。。
