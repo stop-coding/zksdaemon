@@ -71,12 +71,12 @@ class zksDaemon(object):
         转变自身角色
     ##使用方法
         直接调用：
-        daemon = zksDaemon(host="127.0.0.1:9639", myid=1)
+        daemon = zksDaemon(host="10.24.37.1:9639:9639", myid=1)
         daemon.run()
         # 这里会阻塞，直到session过期或者超时自动释放
 
         使用with:
-        with zksDaemon(host="127.0.0.1:9639", myid=1) as daemon:
+        with zksDaemon(host="10.24.37.1:9639:9639", myid=1):
             print("wait %d exit" %(l.id))
     ##注意：
         该类实例的生命周期是zookeeper client session有效为准,
@@ -253,7 +253,7 @@ class zksDaemon(object):
         my_status = self.zkc.exists(os.path.join(self.participant_status_path, self.myid))
         #避免重启，旧的session还未超时，导致其还占着状态值
         if my_status:
-            (session_id, session_pwd) = self.zkc.client_id
+            (session_id,_) = self.zkc.client_id
             if my_status.owner_session_id == session_id:
                 return True
             else:
@@ -314,7 +314,8 @@ class zksDaemon(object):
             self.log.info("Zookeeper connection established, state: %s, session id: 0x%x" %(str(state), id))
             self.alive = True
         elif state in KazooState.SUSPENDED:
-            self.log.info("Zookeeper session suspended, state: %s" %(str(state)))
+            (id, _) = self.zkc.client_id
+            self.log.WARN("Zookeeper session[0x%x] suspended, state: %s" %(id, str(state)))
         else:
             if self.alive:
                 self.log.error("Zookeeper connection lost: %s" %(str(state)))
@@ -618,12 +619,12 @@ class zksLoop(object):
         该类用于重建zksDaemon实例，使其保持一直运行状态，直至退出
     ##使用方法
         直接调用：
-        loop = zksLoop(host="127.0.0.1:9639", myid=1)
+        loop = zksLoop(host="10.24.37.1:9639:9639", myid=1)
         loop = start()
         # 这里会阻塞，直到session过期或者超时自动释放
 
         使用with:
-        with zksLoop(host="127.0.0.1:9639", myid=1) as l:
+        with zksLoop(host="10.24.37.1:9639:9639", myid=1) as l:
             print("wait %d exit" %(l.id))
     """
     def __init__(self, host, myid, timeout=8.0, retry_delay=15,
@@ -634,9 +635,9 @@ class zksLoop(object):
             host            需要守护的server，其客户端访问地址，如"10.24.37.1:9639".不可以是本地地址
             id              需要守护的serverid，每个zks都有一个唯一id值
             timeout         session超时时间
-            check_delay     自动检查节点角色状态是否同步的时间间隔，默认为5分钟
+            retry_delay     尝试重建zksDaemon的时间间隔
             lockPath        内部分布式锁的路径，默认不用改
-            statusPath      participant状态存储路径
+            statusPath      participant状态存储路径。默认不用改
             election_port   选举端口，与默认不一样的话，得改
             transction_port 内部传输端口，与默认不一样的话，就得改
             logger          日志打印类，默认print，自定义的话需要继承基类zkLogger
