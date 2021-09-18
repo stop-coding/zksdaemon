@@ -238,7 +238,7 @@ class zksDaemon(object):
                 else:
                     #如果节点不存在，但集群还存在自己的配置，则可以重新注册自己的状态,注册本节点状态只有本节点再会执行，不需要写锁
                     self.zkc.create(my_status_path, ephemeral=True, makepath=True)
-            self.log.info("my node[%s] register participant success." %(self.myid))
+                self.log.info("my node[%s] register participant success." %(self.myid))
         except Exception as e:
             self.log.error("do participant err: {}".format(e))
             retry=True
@@ -672,7 +672,6 @@ class zksLoop(object):
             except Exception as e:
                 if self.is_runing:
                     self.logger.error("daemon error:{}, exit.".format(e))
-                    raise e
             if self.is_runing:
                 self.logger.info("zks daemon exit, sleep time [%ds], will rebuild." %(self.retry_delay))
                 self._sig.wait(self.retry_delay)
