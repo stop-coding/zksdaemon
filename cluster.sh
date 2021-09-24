@@ -6,15 +6,23 @@ WORK_DIR=`pwd`
 NODE_NUM=3
 CLUSTER_ID=2
 ZKS_DAEMON_IMAGE='zksdaemon:latest'
-ZKS_IMAGE='zookeeper:3.6.3'
+ZKS_IMAGE='zookeeper:latest'
 IS_CLEAR=0
+CPORT='9639'
+QUORUM_PORT='2888'
+ELECTION_PORT='3888'
+DAEMON_OFF=0
 
-while getopts "p:n:d:z:i:hc" arg 
+while getopts "p:n:d:z:i:hco" arg 
 do
         case $arg in
             c)
                 IS_CLEAR=1
                 echo "Cleaning cluster...."
+                ;;
+            0)
+                DAEMON_OFF=1
+                echo "DAEMON_OFF...."
                 ;;
             p)
                 WORK_DIR=$OPTARG
@@ -79,18 +87,20 @@ metricsProvider.className=org.apache.zookeeper.metrics.prometheus.PrometheusMetr
 metricsProvider.httpPort=7000
 metricsProvider.exportJvmInfo=true
 [zookeeper]=
+cnxTimeout=200
 tickTime=2000
 dataDir=/data
 dataLogDir=/datalog
 reconfigEnabled=true
 preAllocSize=16384
-standaloneEnabled=false" > $zksDir/conf/zoo.cfg
+standaloneEnabled=false
+dynamicConfigFile=/conf/zoo.cfg.dynamic" > $zksDir/conf/zoo.cfg
     #这里可以考虑少于等于3个节点时，都是participant。
     if [ -z $cluster ];then
-        echo -e "server.$myid=$myip:2888:3888:participant;0.0.0.0:$CPORT" >> $zksDir/conf/zoo.cfg
+        echo -e "server.$myid=$myip:$QUORUM_PORT:$ELECTION_PORT;0.0.0.0:$CPORT" > $zksDir/conf/zoo.cfg.dynamic
     else
-        echo -e "$cluster" >> $zksDir/conf/zoo.cfg
-        echo -e "server.$myid=$myip:2888:3888:participant;0.0.0.0:$CPORT" >> $zksDir/conf/zoo.cfg
+        echo -e "$cluster" > $zksDir/conf/zoo.cfg.dynamic
+        echo -e "server.$myid=$myip:$QUORUM_PORT:$ELECTION_PORT;0.0.0.0:$CPORT" >> $zksDir/conf/zoo.cfg.dynamic
     fi
 
 echo "export ZK_SERVER_HEAP=2048
@@ -208,7 +218,7 @@ function add_zks_daemon(){
     fi
     docker container stop $CLUSTER_NAME-$myid-daemon > /dev/null 2>&1
     docker rm $CLUSTER_NAME-$myid-daemon> /dev/null 2>&1
-    cmd="docker run -dit --privileged=true --name=$CLUSTER_NAME-$myid-daemon --network=host $ZKS_DAEMON_IMAGE $myid $myhost"
+    cmd="docker run -dit --privileged=true --name=$CLUSTER_NAME-$myid-daemon --network=host $ZKS_DAEMON_IMAGE -i $myid -h $myhost"
     $cmd
     if [ $? != 0 ];then
 		echo "run daemon docker fail, [$cmd]"
@@ -232,7 +242,7 @@ function clear_cluster()
 CLUSTER="zks"
 CLUSTER_NAME="$CLUSTER.$CLUSTER_ID"
 NETWORK_ADDR="172.22.$CLUSTER_ID.0"
-CPORT='9639'
+
 
 echo "### create zookeeper cluster ###"
 
@@ -304,15 +314,15 @@ do
         echo "[add_zks_node $g_myid $node_ip $server_info] fail..."
         exit 1
     fi
-
-    add_zks_daemon $g_myid $node_ip:$CPORT
-    if [ $? != 0 ];then
-        echo "[add_zks_daemon $g_myid $node_ip:$CPORT] fail..."
-        exit 1
+    if [ $DAEMON_OFF == 0 ];then
+        add_zks_daemon $g_myid $node_ip:$CPORT
+        if [ $? != 0 ];then
+            echo "[add_zks_daemon $g_myid $node_ip:$CPORT] fail..."
+            exit 1
+        fi
     fi
-
 	#server_info=`echo conf|nc $node_ip $CPORT|grep 'server\.'|grep "$CPORT"`
-    server_info="$server_info""server.$g_myid=$node_ip:2888:3888:participant;0.0.0.0:$CPORT\n"
+    server_info="$server_info""server.$g_myid=$node_ip:$QUORUM_PORT:$ELECTION_PORT;0.0.0.0:$CPORT\n"
 	echo -e "update cluster: $server_info"
 
 	let g_myid++

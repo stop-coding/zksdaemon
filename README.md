@@ -11,10 +11,10 @@ debian：
 
 ### 2.获取镜像
 
-获取zookeeper镜像，如3.6.3
+获取zookeeper镜像，如3.5.6
 获取python镜像，如python:latest
 
-    docker pull zookeeper:3.6.3
+    docker pull zookeeper:3.5.6
     docker pull python:latest
 
 ### 3.打包本地镜像

@@ -1,0 +1,6 @@
+
+FROM zksdaemon:1.0.0
+
+WORKDIR /app
+COPY zks_daemon.py /app/
+ENTRYPOINT ["/usr/local/bin/python3", "/app/zks_daemon.py"]

@@ -4,9 +4,6 @@ ARG PYTHON_VERSION=latest
 FROM python:${PYTHON_VERSION}
 
 WORKDIR /app
-COPY zksDaemon.py /app
-COPY init.sh /app
-RUN pip3 install kazoo && \
-    chmod +x /app/init.sh
-
-ENTRYPOINT ["/app/init.sh"]
+COPY zks_daemon.py /app
+RUN pip3 install kazoo
+ENTRYPOINT ["/usr/local/bin/python3", "/app/zks_daemon.py"]
