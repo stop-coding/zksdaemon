@@ -1,6 +1,10 @@
 # 简介
 
-zookeeper daemon for servers
+该项目用于检测和调整zookeeper集群follower角色，实现集群follower角色动态稳定在一定的数量。
+zookeeper 服务端角色有参与者哥观察者，对于大规模集群，参与者过多会影响集群性能，但太少可靠性又降低。
+这里提出一种动态改变follwer角色的解决方案，但集群里follower节点故障时，可以自动地让观察者升级为参与者。
+具体实现请看WIKI：<https://github.com/stop-coding/zksdaemon/wiki/zookeeper%E5%8A%A8%E6%80%81%E9%9B%86%E7%BE%A4%E8%AE%BE%E8%AE%A1>
+
 
 # 环境配置
 
